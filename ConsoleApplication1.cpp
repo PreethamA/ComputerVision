@@ -1,88 +1,44 @@
-
-/*
- ConsoleApplication2.cpp
- The program takes the video feed from the cam and detects the laplace points in the image
-*/
-#include "opencv2/videoio.hpp"
-#include "opencv2/highgui.hpp"
 #include "opencv2/imgproc.hpp"
-#include <ctype.h>
-#include <stdio.h>
+#include "opencv2/imgcodecs.hpp"
+#include "opencv2/highgui.hpp"
 #include <iostream>
 using namespace cv;
-using namespace std;
-static void help(char** argv)
-{
-    cout <<
-        "\nThis program demonstrates Laplace point/edge detection using OpenCV function Laplacian()\n"
-        "It captures from the camera of your choice: 0, 1, ... default 0\n"
-        "Call:\n"
-        << argv[0] << " -c=<camera #, default 0> -p=<index of the frame to be decoded/captured next>\n" << endl;
-}
-enum { GAUSSIAN, BLUR, MEDIAN };
-int sigma = 3;
-int smoothType = GAUSSIAN;
+Mat src, dst;
+int morph_elem = 0;
+int morph_size = 0;
+int morph_operator = 0;
+int const max_operator = 4;
+int const max_elem = 2;
+int const max_kernel_size = 21;
+const char* window_name = "Morphology Transformations Demo";
+void Morphology_Operations(int, void*);
 int main(int argc, char** argv)
 {
-    cv::CommandLineParser parser(argc, argv, "{ c | 0 | }{ p | | }");
-    help(argv);
-    VideoCapture cap;
-    string camera = parser.get<string>("c");
-    if (camera.size() == 1 && isdigit(camera[0]))
-        cap.open(parser.get<int>("c"));
-    else
-        cap.open(samples::findFileOrKeep(camera));
-    if (!cap.isOpened())
+    CommandLineParser parser(argc, argv, "{@input | baboon.jpg | input image}");
+    src = imread(samples::findFile(parser.get<String>("@input")), IMREAD_COLOR);
+    if (src.empty())
     {
-        cerr << "Can't open camera/video stream: " << camera << endl;
-        return 1;
+        std::cout << "Could not open or find the image!\n" << std::endl;
+        std::cout << "Usage: " << argv[0] << " <Input image>" << std::endl;
+        return EXIT_FAILURE;
     }
-    cout << "Video " << parser.get<string>("c") <<
-        ": width=" << cap.get(CAP_PROP_FRAME_WIDTH) <<
-        ", height=" << cap.get(CAP_PROP_FRAME_HEIGHT) <<
-        ", nframes=" << cap.get(CAP_PROP_FRAME_COUNT) << endl;
-    int pos = 0;
-    if (parser.has("p"))
-    {
-        pos = parser.get<int>("p");
-    }
-    if (!parser.check())
-    {
-        parser.printErrors();
-        return -1;
-    }
-    if (pos != 0)
-    {
-        cout << "seeking to frame #" << pos << endl;
-        if (!cap.set(CAP_PROP_POS_FRAMES, pos))
-        {
-            cerr << "ERROR: seekeing is not supported" << endl;
-        }
-    }
-    namedWindow("Laplacian", WINDOW_AUTOSIZE);
-    createTrackbar("Sigma", "Laplacian", &sigma, 15, 0);
-    Mat smoothed, laplace, result;
-    for (;;)
-    {
-        Mat frame;
-        cap >> frame;
-        if (frame.empty())
-            break;
-        int ksize = (sigma * 5) | 1;
-        if (smoothType == GAUSSIAN)
-            GaussianBlur(frame, smoothed, Size(ksize, ksize), sigma, sigma);
-        else if (smoothType == BLUR)
-            blur(frame, smoothed, Size(ksize, ksize));
-        else
-            medianBlur(frame, smoothed, ksize);
-        Laplacian(smoothed, laplace, CV_16S, 5);
-        convertScaleAbs(laplace, result, (sigma + 1) * 0.25);
-        imshow("Laplacian", result);
-        char c = (char)waitKey(30);
-        if (c == ' ')
-            smoothType = smoothType == GAUSSIAN ? BLUR : smoothType == BLUR ? MEDIAN : GAUSSIAN;
-        if (c == 'q' || c == 'Q' || c == 27)
-            break;
-    }
+    namedWindow(window_name, WINDOW_AUTOSIZE); // Create window
+    createTrackbar("Operator:\n 0: Opening - 1: Closing  \n 2: Gradient - 3: Top Hat \n 4: Black Hat", window_name, &morph_operator, max_operator, Morphology_Operations);
+    createTrackbar("Element:\n 0: Rect - 1: Cross - 2: Ellipse", window_name,
+        &morph_elem, max_elem,
+        Morphology_Operations);
+    createTrackbar("Kernel size:\n 2n +1", window_name,
+        &morph_size, max_kernel_size,
+        Morphology_Operations);
+    Morphology_Operations(0, 0);
+    waitKey(0);
     return 0;
+}
+static void Morphology_Operations(int, void*)
+{
+    // Since MORPH_X : 2,3,4,5 and 6
+    int operation = morph_operator + 2;
+    Mat element = getStructuringElement(morph_elem, Size(2 * morph_size + 1, 2 * morph_size + 1), Point(morph_size, morph_size));
+    morphologyEx(src, dst, operation, element);
+    imshow(window_name, dst);
 }
