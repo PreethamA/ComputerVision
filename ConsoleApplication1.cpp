@@ -30,7 +30,7 @@ int main() {
         //medianBlur(gray, gray, 5);
         vector<Vec3f> circles;
         HoughCircles(gray, circles, HOUGH_GRADIENT, 1,
-            gray.rows / 16,  // change this value to detect circles with different distances to each other
+            gray.rows / 2,  // change this value to detect circles with different distances to each other
             100, 30, 1, 30 // change the last two parameters
        // (min_radius & max_radius) to detect larger circles
         );
