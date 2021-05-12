@@ -1,264 +1,160 @@
+#include <opencv2/core/utility.hpp>
 #include "opencv2/imgproc.hpp"
 #include "opencv2/imgcodecs.hpp"
 #include "opencv2/highgui.hpp"
-#include <iostream>
-using namespace cv;
+#include <stdio.h>
 using namespace std;
-class canvas {
-public:
-    bool setupQ;
-    cv::Point origin;
-    cv::Point corner;
-    int minDims, maxDims;
-    double scale;
-    int rows, cols;
-    cv::Mat img;
-    void init(int minD, int maxD) {
-        // Initialise the canvas with minimum and maximum rows and column sizes.
-        minDims = minD; maxDims = maxD;
-        origin = cv::Point(0, 0);
-        corner = cv::Point(0, 0);
-        scale = 1.0;
-        rows = 0;
-        cols = 0;
-        setupQ = false;
+using namespace cv;
+int maskSize0 = DIST_MASK_5;
+int voronoiType = -1;
+int edgeThresh = 100;
+int distType0 = DIST_L1;
+// The output and temporary images
+Mat gray;
+// threshold trackbar callback
+static void onTrackbar(int, void*)
+{
+    static const Scalar colors[] =
+    {
+        Scalar(0,0,0),
+        Scalar(255,0,0),
+        Scalar(255,128,0),
+        Scalar(255,255,0),
+        Scalar(0,255,0),
+        Scalar(0,128,255),
+        Scalar(0,255,255),
+        Scalar(0,0,255),
+        Scalar(255,0,255)
+    };
+    int maskSize = voronoiType >= 0 ? DIST_MASK_5 : maskSize0;
+    int distType = voronoiType >= 0 ? DIST_L2 : distType0;
+    Mat edge = gray >= edgeThresh, dist, labels, dist8u;
+    if (voronoiType < 0)
+        distanceTransform(edge, dist, distType, maskSize);
+    else
+        distanceTransform(edge, dist, labels, distType, maskSize, voronoiType);
+    if (voronoiType < 0)
+    {
+        // begin "painting" the distance transform result
+        dist *= 5000;
+        pow(dist, 0.5, dist);
+        Mat dist32s, dist8u1, dist8u2;
+        dist.convertTo(dist32s, CV_32S, 1, 0.5);
+        dist32s &= Scalar::all(255);
+        dist32s.convertTo(dist8u1, CV_8U, 1, 0);
+        dist32s *= -1;
+        dist32s += Scalar::all(255);
+        dist32s.convertTo(dist8u2, CV_8U);
+        Mat planes[] = { dist8u1, dist8u2, dist8u2 };
+        merge(planes, 3, dist8u);
     }
-    void stretch(cv::Point2f min, cv::Point2f max) {
-        // Stretch the canvas to include the points min and max.
-        if (setupQ) {
-            if (corner.x < max.x) { corner.x = (int)(max.x + 1.0); };
-            if (corner.y < max.y) { corner.y = (int)(max.y + 1.0); };
-            if (origin.x > min.x) { origin.x = (int)min.x; };
-            if (origin.y > min.y) { origin.y = (int)min.y; };
-        }
-        else {
-            origin = cv::Point((int)min.x, (int)min.y);
-            corner = cv::Point((int)(max.x + 1.0), (int)(max.y + 1.0));
-        }
-        int c = (int)(scale * ((corner.x + 1.0) - origin.x));
-        if (c < minDims) {
-            scale = scale * (double)minDims / (double)c;
-        }
-        else {
-            if (c > maxDims) {
-                scale = scale * (double)maxDims / (double)c;
+    else
+    {
+        dist8u.create(labels.size(), CV_8UC3);
+        for (int i = 0; i < labels.rows; i++)
+        {
+            const int* ll = (const int*)labels.ptr(i);
+            const float* dd = (const float*)dist.ptr(i);
+            uchar* d = (uchar*)dist8u.ptr(i);
+            for (int j = 0; j < labels.cols; j++)
+            {
+                int idx = ll[j] == 0 || dd[j] == 0 ? 0 : (ll[j] - 1) % 8 + 1;
+                float scale = 1.f / (1 + dd[j] * dd[j] * 0.0004f);
+                int b = cvRound(colors[idx][0] * scale);
+                int g = cvRound(colors[idx][1] * scale);
+                int r = cvRound(colors[idx][2] * scale);
+                d[j * 3] = (uchar)b;
+                d[j * 3 + 1] = (uchar)g;
+                d[j * 3 + 2] = (uchar)r;
             }
         }
-        int r = (int)(scale * ((corner.y + 1.0) - origin.y));
-        if (r < minDims) {
-            scale = scale * (double)minDims / (double)r;
-        }
-        else {
-            if (r > maxDims) {
-                scale = scale * (double)maxDims / (double)r;
-            }
-        }
-        cols = (int)(scale * ((corner.x + 1.0) - origin.x));
-        rows = (int)(scale * ((corner.y + 1.0) - origin.y));
-        setupQ = true;
     }
-    void stretch(vector<Point2f> pts)
-    {   // Stretch the canvas so all the points pts are on the canvas.
-        cv::Point2f min = pts[0];
-        cv::Point2f max = pts[0];
-        for (size_t i = 1; i < pts.size(); i++) {
-            Point2f pnt = pts[i];
-            if (max.x < pnt.x) { max.x = pnt.x; };
-            if (max.y < pnt.y) { max.y = pnt.y; };
-            if (min.x > pnt.x) { min.x = pnt.x; };
-            if (min.y > pnt.y) { min.y = pnt.y; };
-        };
-        stretch(min, max);
-    }
-    void stretch(cv::RotatedRect box)
-    {   // Stretch the canvas so that the rectangle box is on the canvas.
-        cv::Point2f min = box.center;
-        cv::Point2f max = box.center;
-        cv::Point2f vtx[4];
-        box.points(vtx);
-        for (int i = 0; i < 4; i++) {
-            cv::Point2f pnt = vtx[i];
-            if (max.x < pnt.x) { max.x = pnt.x; };
-            if (max.y < pnt.y) { max.y = pnt.y; };
-            if (min.x > pnt.x) { min.x = pnt.x; };
-            if (min.y > pnt.y) { min.y = pnt.y; };
-        }
-        stretch(min, max);
-    }
-    void drawEllipseWithBox(cv::RotatedRect box, cv::Scalar color, int lineThickness)
-    {
-        if (img.empty()) {
-            stretch(box);
-            img = cv::Mat::zeros(rows, cols, CV_8UC3);
-        }
-        box.center = scale * cv::Point2f(box.center.x - origin.x, box.center.y - origin.y);
-        box.size.width = (float)(scale * box.size.width);
-        box.size.height = (float)(scale * box.size.height);
-        ellipse(img, box, color, lineThickness, LINE_AA);
-        Point2f vtx[4];
-        box.points(vtx);
-        for (int j = 0; j < 4; j++) {
-            line(img, vtx[j], vtx[(j + 1) % 4], color, lineThickness, LINE_AA);
-        }
-    }
-    void drawPoints(vector<Point2f> pts, cv::Scalar color)
-    {
-        if (img.empty()) {
-            stretch(pts);
-            img = cv::Mat::zeros(rows, cols, CV_8UC3);
-        }
-        for (size_t i = 0; i < pts.size(); i++) {
-            Point2f pnt = scale * cv::Point2f(pts[i].x - origin.x, pts[i].y - origin.y);
-            img.at<cv::Vec3b>(int(pnt.y), int(pnt.x))[0] = (uchar)color[0];
-            img.at<cv::Vec3b>(int(pnt.y), int(pnt.x))[1] = (uchar)color[1];
-            img.at<cv::Vec3b>(int(pnt.y), int(pnt.x))[2] = (uchar)color[2];
-        };
-    }
-    void drawLabels(std::vector<std::string> text, std::vector<cv::Scalar> colors)
-    {
-        if (img.empty()) {
-            img = cv::Mat::zeros(rows, cols, CV_8UC3);
-        }
-        int vPos = 0;
-        for (size_t i = 0; i < text.size(); i++) {
-            cv::Scalar color = colors[i];
-            std::string txt = text[i];
-            Size textsize = getTextSize(txt, FONT_HERSHEY_COMPLEX, 1, 1, 0);
-            vPos += (int)(1.3 * textsize.height);
-            Point org((img.cols - textsize.width), vPos);
-            cv::putText(img, txt, org, FONT_HERSHEY_COMPLEX, 1, color, 1, LINE_8);
-        }
-    }
+    imshow("Distance Map", dist8u);
+}
+static void help(const char** argv)
+{
+    printf("\nProgram to demonstrate the use of the distance transform function between edge images.\n"
+        "Usage:\n"
+        "%s [image_name -- default image is stuff.jpg]\n"
+        "\nHot keys: \n"
+        "\tESC - quit the program\n"
+        "\tC - use C/Inf metric\n"
+        "\tL1 - use L1 metric\n"
+        "\tL2 - use L2 metric\n"
+        "\t3 - use 3x3 mask\n"
+        "\t5 - use 5x5 mask\n"
+        "\t0 - use precise distance transform\n"
+        "\tv - switch to Voronoi diagram mode\n"
+        "\tp - switch to pixel-based Voronoi diagram mode\n"
+        "\tSPACE - loop through all the modes\n\n", argv[0]);
+}
+const char* keys =
+{
+    "{help h||}{@image |stuff.jpg|input image file}"
 };
-static void help(char** argv)
+int main(int argc, const char** argv)
 {
-    cout << "\nThis program is demonstration for ellipse fitting. The program finds\n"
-        "contours and approximate it by ellipses. Three methods are used to find the \n"
-        "elliptical fits: fitEllipse, fitEllipseAMS and fitEllipseDirect.\n"
-        "Call:\n"
-        << argv[0] << " [image_name -- Default ellipses.jpg]\n" << endl;
-}
-int sliderPos = 70;
-Mat image;
-bool fitEllipseQ, fitEllipseAMSQ, fitEllipseDirectQ;
-cv::Scalar fitEllipseColor = Scalar(255, 0, 0);
-cv::Scalar fitEllipseAMSColor = Scalar(0, 255, 0);
-cv::Scalar fitEllipseDirectColor = Scalar(0, 0, 255);
-cv::Scalar fitEllipseTrueColor = Scalar(255, 255, 255);
-void processImage(int, void*);
-int main(int argc, char** argv)
-{
-    fitEllipseQ = true;
-    fitEllipseAMSQ = true;
-    fitEllipseDirectQ = true;
-    cv::CommandLineParser parser(argc, argv, "{help h||}{@image|ellipses.jpg|}");
+    CommandLineParser parser(argc, argv, keys);
+    help(argv);
     if (parser.has("help"))
+        return 0;
+    string filename = parser.get<string>(0);
+    gray = imread(samples::findFile(filename), 0);
+    if (gray.empty())
     {
+        printf("Cannot read image file: %s\n", filename.c_str());
         help(argv);
-        return 0;
+        return -1;
     }
-    string filename = parser.get<string>("@image");
-    image = imread(samples::findFile(filename), 0);
-    if (image.empty())
+    namedWindow("Distance Map", 1);
+    createTrackbar("Brightness Threshold", "Distance Map", &edgeThresh, 255, onTrackbar, 0);
+    for (;;)
     {
-        cout << "Couldn't open image " << filename << "\n";
-        return 0;
-    }
-    imshow("source", image);
-    namedWindow("result", WINDOW_NORMAL);
-    // Create toolbars. HighGUI use.
-    createTrackbar("threshold", "result", &sliderPos, 255, processImage);
-    processImage(0, 0);
-    // Wait for a key stroke; the same function arranges events processing
-    waitKey();
-    return 0;
-}
-// Define trackbar callback function. This function finds contours,
-// draws them, and approximates by ellipses.
-void processImage(int /*h*/, void*)
-{
-    RotatedRect box, boxAMS, boxDirect;
-    vector<vector<Point> > contours;
-    Mat bimage = image >= sliderPos;
-    findContours(bimage, contours, RETR_LIST, CHAIN_APPROX_NONE);
-    canvas paper;
-    paper.init(int(0.8 * MIN(bimage.rows, bimage.cols)), int(1.2 * MAX(bimage.rows, bimage.cols)));
-    paper.stretch(cv::Point2f(0.0f, 0.0f), cv::Point2f((float)(bimage.cols + 2.0), (float)(bimage.rows + 2.0)));
-    std::vector<std::string> text;
-    std::vector<cv::Scalar> color;
-    if (fitEllipseQ) {
-        text.push_back("OpenCV");
-        color.push_back(fitEllipseColor);
-    }
-    if (fitEllipseAMSQ) {
-        text.push_back("AMS");
-        color.push_back(fitEllipseAMSColor);
-    }
-    if (fitEllipseDirectQ) {
-        text.push_back("Direct");
-        color.push_back(fitEllipseDirectColor);
-    }
-    paper.drawLabels(text, color);
-    int margin = 2;
-    vector< vector<Point2f> > points;
-    for (size_t i = 0; i < contours.size(); i++)
-    {
-        size_t count = contours[i].size();
-        if (count < 6)
-            continue;
-        Mat pointsf;
-        Mat(contours[i]).convertTo(pointsf, CV_32F);
-        vector<Point2f>pts;
-        for (int j = 0; j < pointsf.rows; j++) {
-            Point2f pnt = Point2f(pointsf.at<float>(j, 0), pointsf.at<float>(j, 1));
-            if ((pnt.x > margin && pnt.y > margin && pnt.x < bimage.cols - margin && pnt.y < bimage.rows - margin)) {
-                if (j % 20 == 0) {
-                    pts.push_back(pnt);
-                }
+        // Call to update the view
+        onTrackbar(0, 0);
+        char c = (char)waitKey(0);
+        if (c == 27)
+            break;
+        if (c == 'c' || c == 'C' || c == '1' || c == '2' ||
+            c == '3' || c == '5' || c == '0')
+            voronoiType = -1;
+        if (c == 'c' || c == 'C')
+            distType0 = DIST_C;
+        else if (c == '1')
+            distType0 = DIST_L1;
+        else if (c == '2')
+            distType0 = DIST_L2;
+        else if (c == '3')
+            maskSize0 = DIST_MASK_3;
+        else if (c == '5')
+            maskSize0 = DIST_MASK_5;
+        else if (c == '0')
+            maskSize0 = DIST_MASK_PRECISE;
+        else if (c == 'v')
+            voronoiType = 0;
+        else if (c == 'p')
+            voronoiType = 1;
+        else if (c == ' ')
+        {
+            if (voronoiType == 0)
+                voronoiType = 1;
+            else if (voronoiType == 1)
+            {
+                voronoiType = -1;
+                maskSize0 = DIST_MASK_3;
+                distType0 = DIST_C;
             }
+            else if (distType0 == DIST_C)
+                distType0 = DIST_L1;
+            else if (distType0 == DIST_L1)
+                distType0 = DIST_L2;
+            else if (maskSize0 == DIST_MASK_3)
+                maskSize0 = DIST_MASK_5;
+            else if (maskSize0 == DIST_MASK_5)
+                maskSize0 = DIST_MASK_PRECISE;
+            else if (maskSize0 == DIST_MASK_PRECISE)
+                voronoiType = 0;
         }
-        points.push_back(pts);
     }
-    for (size_t i = 0; i < points.size(); i++)
-    {
-        vector<Point2f> pts = points[i];
-        if (pts.size() <= 5) {
-            continue;
-        }
-        if (fitEllipseQ) {
-            box = fitEllipse(pts);
-            if (MAX(box.size.width, box.size.height) > MIN(box.size.width, box.size.height) * 30 ||
-                MAX(box.size.width, box.size.height) <= 0 ||
-                MIN(box.size.width, box.size.height) <= 0) {
-                continue;
-            };
-        }
-        if (fitEllipseAMSQ) {
-            boxAMS = fitEllipseAMS(pts);
-            if (MAX(boxAMS.size.width, boxAMS.size.height) > MIN(boxAMS.size.width, boxAMS.size.height) * 30 ||
-                MAX(box.size.width, box.size.height) <= 0 ||
-                MIN(box.size.width, box.size.height) <= 0) {
-                continue;
-            };
-        }
-        if (fitEllipseDirectQ) {
-            boxDirect = fitEllipseDirect(pts);
-            if (MAX(boxDirect.size.width, boxDirect.size.height) > MIN(boxDirect.size.width, boxDirect.size.height) * 30 ||
-                MAX(box.size.width, box.size.height) <= 0 ||
-                MIN(box.size.width, box.size.height) <= 0) {
-                continue;
-            };
-        }
-        if (fitEllipseQ) {
-            paper.drawEllipseWithBox(box, fitEllipseColor, 3);
-        }
-        if (fitEllipseAMSQ) {
-            paper.drawEllipseWithBox(boxAMS, fitEllipseAMSColor, 2);
-        }
-        if (fitEllipseDirectQ) {
-            paper.drawEllipseWithBox(boxDirect, fitEllipseDirectColor, 1);
-        }
-        paper.drawPoints(pts, cv::Scalar(255, 255, 255));
-    }
-    imshow("result", paper.img);
+    return 0;
 }
