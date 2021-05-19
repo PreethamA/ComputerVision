@@ -1,242 +1,159 @@
-#include "opencv2/objdetect.hpp"
-#include "opencv2/highgui.hpp"
 #include "opencv2/imgproc.hpp"
+#include "opencv2/imgcodecs.hpp"
 #include "opencv2/videoio.hpp"
+#include "opencv2/highgui.hpp"
 #include <iostream>
-using namespace std;
 using namespace cv;
-static void help(const char** argv)
+using namespace std;
+static void help(char** argv)
 {
-    cout << "\nThis program demonstrates the use of cv::CascadeClassifier class to detect objects (Face + eyes). You can use Haar or LBP features.\n"
-        "This classifier can recognize many kinds of rigid objects, once the appropriate classifier is trained.\n"
-        "It's most known use is for faces.\n"
-        "Usage:\n"
+    cout << "\nThis program demonstrated the floodFill() function\n"
+        "Call:\n"
         << argv[0]
-        << "   [--cascade=<cascade_path> this is the primary trained classifier such as frontal face]\n"
-        "   [--nested-cascade[=nested_cascade_path this an optional secondary classifier such as eyes]]\n"
-        "   [--scale=<image scale greater or equal to 1, try 1.3 for example>]\n"
-        "   [--try-flip]\n"
-        "   [filename|camera_index]\n\n"
-        "example:\n"
-        << argv[0]
-        << " --cascade=\"data/haarcascades/haarcascade_frontalface_alt.xml\" --nested-cascade=\"data/haarcascades/haarcascade_eye_tree_eyeglasses.xml\" --scale=1.3\n\n"
-        "During execution:\n\tHit any key to quit.\n"
-        "\tUsing OpenCV version " << CV_VERSION << "\n" << endl;
+        << " [image_name -- Default: fruits.jpg]\n" << endl;
+    cout << "Hot keys: \n"
+        "\tESC - quit the program\n"
+        "\tc - switch color/grayscale mode\n"
+        "\tm - switch mask mode\n"
+        "\tr - restore the original image\n"
+        "\ts - use null-range floodfill\n"
+        "\tf - use gradient floodfill with fixed(absolute) range\n"
+        "\tg - use gradient floodfill with floating(relative) range\n"
+        "\t4 - use 4-connectivity mode\n"
+        "\t8 - use 8-connectivity mode\n" << endl;
 }
-void detectAndDraw(Mat& img, CascadeClassifier& cascade,
-    CascadeClassifier& nestedCascade,
-    double scale, bool tryflip);
-string cascadeName;
-string nestedCascadeName;
-int main(int argc, const char** argv)
+Mat image0, image, gray, mask;
+int ffillMode = 1;
+int loDiff = 20, upDiff = 20;
+int connectivity = 4;
+int isColor = true;
+bool useMask = false;
+int newMaskVal = 255;
+static void onMouse(int event, int x, int y, int, void*)
 {
-    VideoCapture capture;
-    Mat frame, image;
-    string inputName;
-    bool tryflip;
-    CascadeClassifier cascade, nestedCascade;
-    double scale;
+    if (event != EVENT_LBUTTONDOWN)
+        return;
+    Point seed = Point(x, y);
+    int lo = ffillMode == 0 ? 0 : loDiff;
+    int up = ffillMode == 0 ? 0 : upDiff;
+    int flags = connectivity + (newMaskVal << 8) +
+        (ffillMode == 1 ? FLOODFILL_FIXED_RANGE : 0);
+    int b = (unsigned)theRNG() & 255;
+    int g = (unsigned)theRNG() & 255;
+    int r = (unsigned)theRNG() & 255;
+    Rect ccomp;
+    Scalar newVal = isColor ? Scalar(b, g, r) : Scalar(r * 0.299 + g * 0.587 + b * 0.114);
+    Mat dst = isColor ? image : gray;
+    int area;
+    if (useMask)
+    {
+        threshold(mask, mask, 1, 128, THRESH_BINARY);
+        area = floodFill(dst, mask, seed, newVal, &ccomp, Scalar(lo, lo, lo),
+            Scalar(up, up, up), flags);
+        imshow("mask", mask);
+    }
+    else
+    {
+        area = floodFill(dst, seed, newVal, &ccomp, Scalar(lo, lo, lo),
+            Scalar(up, up, up), flags);
+    }
+    imshow("image", dst);
+    cout << area << " pixels were repainted\n";
+}
+int main(int argc, char** argv)
+{
     cv::CommandLineParser parser(argc, argv,
-        "{help h||}"
-        "{cascade|data/haarcascades/haarcascade_frontalface_alt.xml|}"
-        "{nested-cascade|data/haarcascades/haarcascade_eye_tree_eyeglasses.xml|}"
-        "{scale|1|}{try-flip||}{@filename||}"
+        "{help h | | show help message}{@image|fruits.jpg| input image}"
     );
     if (parser.has("help"))
     {
-        help(argv);
+        parser.printMessage();
         return 0;
     }
-    cascadeName = parser.get<string>("cascade");
-    nestedCascadeName = parser.get<string>("nested-cascade");
-    scale = parser.get<double>("scale");
-    if (scale < 1)
-        scale = 1;
-    tryflip = parser.has("try-flip");
-    inputName = parser.get<string>("@filename");
-    if (!parser.check())
+    string filename = parser.get<string>("@image");
+    image0 = imread(samples::findFile(filename), 1);
+    if (image0.empty())
     {
-        parser.printErrors();
+        cout << "Image empty\n";
+        parser.printMessage();
         return 0;
     }
-    if (!nestedCascade.load(samples::findFileOrKeep(nestedCascadeName)))
-        cerr << "WARNING: Could not load classifier cascade for nested objects" << endl;
-    if (!cascade.load(samples::findFile(cascadeName)))
+    help(argv);
+    image0.copyTo(image);
+    cvtColor(image0, gray, COLOR_BGR2GRAY);
+    mask.create(image0.rows + 2, image0.cols + 2, CV_8UC1);
+    namedWindow("image", 0);
+    createTrackbar("lo_diff", "image", &loDiff, 255, 0);
+    createTrackbar("up_diff", "image", &upDiff, 255, 0);
+    setMouseCallback("image", onMouse, 0);
+    for (;;)
     {
-        cerr << "ERROR: Could not load classifier cascade" << endl;
-        help(argv);
-        return -1;
-    }
-    if (inputName.empty() || (isdigit(inputName[0]) && inputName.size() == 1))
-    {
-        int camera = inputName.empty() ? 0 : inputName[0] - '0';
-        if (!capture.open(camera))
+        imshow("image", isColor ? image : gray);
+        char c = (char)waitKey(0);
+        if (c == 27)
         {
-            cout << "Capture from camera #" << camera << " didn't work" << endl;
-            return 1;
+            cout << "Exiting ...\n";
+            break;
         }
-    }
-    else if (!inputName.empty())
-    {
-        image = imread(samples::findFileOrKeep(inputName), IMREAD_COLOR);
-        if (image.empty())
+        switch (c)
         {
-            if (!capture.open(samples::findFileOrKeep(inputName)))
+        case 'c':
+            if (isColor)
             {
-                cout << "Could not read " << inputName << endl;
-                return 1;
+                cout << "Grayscale mode is set\n";
+                cvtColor(image0, gray, COLOR_BGR2GRAY);
+                mask = Scalar::all(0);
+                isColor = false;
             }
-        }
-    }
-    else
-    {
-        image = imread(samples::findFile("lena.jpg"), IMREAD_COLOR);
-        if (image.empty())
-        {
-            cout << "Couldn't read lena.jpg" << endl;
-            return 1;
-        }
-    }
-    if (capture.isOpened())
-    {
-        cout << "Video capturing has been started ..." << endl;
-        for (;;)
-        {
-            capture >> frame;
-            if (frame.empty())
-                break;
-            Mat frame1 = frame.clone();
-            detectAndDraw(frame1, cascade, nestedCascade, scale, tryflip);
-            char c = (char)waitKey(10);
-            if (c == 27 || c == 'q' || c == 'Q')
-                break;
-        }
-    }
-    else
-    {
-        cout << "Detecting face(s) in " << inputName << endl;
-        if (!image.empty())
-        {
-            detectAndDraw(image, cascade, nestedCascade, scale, tryflip);
-            waitKey(0);
-        }
-        else if (!inputName.empty())
-        {
-            /* assume it is a text file containing the
-            list of the image filenames to be processed - one per line */
-            FILE* f = fopen(inputName.c_str(), "rt");
-            if (f)
+            else
             {
-                char buf[1000 + 1];
-                while (fgets(buf, 1000, f))
-                {
-                    int len = (int)strlen(buf);
-                    while (len > 0 && isspace(buf[len - 1]))
-                        len--;
-                    buf[len] = '\0';
-                    cout << "file " << buf << endl;
-                    image = imread(buf, 1);
-                    if (!image.empty())
-                    {
-                        detectAndDraw(image, cascade, nestedCascade, scale, tryflip);
-                        char c = (char)waitKey(0);
-                        if (c == 27 || c == 'q' || c == 'Q')
-                            break;
-                    }
-                    else
-                    {
-                        cerr << "Aw snap, couldn't read image " << buf << endl;
-                    }
-                }
-                fclose(f);
+                cout << "Color mode is set\n";
+                image0.copyTo(image);
+                mask = Scalar::all(0);
+                isColor = true;
             }
+            break;
+        case 'm':
+            if (useMask)
+            {
+                destroyWindow("mask");
+                useMask = false;
+            }
+            else
+            {
+                namedWindow("mask", 0);
+                mask = Scalar::all(0);
+                imshow("mask", mask);
+                useMask = true;
+            }
+            break;
+        case 'r':
+            cout << "Original image is restored\n";
+            image0.copyTo(image);
+            cvtColor(image, gray, COLOR_BGR2GRAY);
+            mask = Scalar::all(0);
+            break;
+        case 's':
+            cout << "Simple floodfill mode is set\n";
+            ffillMode = 0;
+            break;
+        case 'f':
+            cout << "Fixed Range floodfill mode is set\n";
+            ffillMode = 1;
+            break;
+        case 'g':
+            cout << "Gradient (floating range) floodfill mode is set\n";
+            ffillMode = 2;
+            break;
+        case '4':
+            cout << "4-connectivity mode is set\n";
+            connectivity = 4;
+            break;
+        case '8':
+            cout << "8-connectivity mode is set\n";
+            connectivity = 8;
+            break;
         }
     }
     return 0;
-}
-void detectAndDraw(Mat& img, CascadeClassifier& cascade,
-    CascadeClassifier& nestedCascade,
-    double scale, bool tryflip)
-{
-    double t = 0;
-    vector<Rect> faces, faces2;
-    const static Scalar colors[] =
-    {
-        Scalar(255,0,0),
-        Scalar(255,128,0),
-        Scalar(255,255,0),
-        Scalar(0,255,0),
-        Scalar(0,128,255),
-        Scalar(0,255,255),
-        Scalar(0,0,255),
-        Scalar(255,0,255)
-    };
-    Mat gray, smallImg;
-    cvtColor(img, gray, COLOR_BGR2GRAY);
-    double fx = 1 / scale;
-    resize(gray, smallImg, Size(), fx, fx, INTER_LINEAR_EXACT);
-    equalizeHist(smallImg, smallImg);
-    t = (double)getTickCount();
-    cascade.detectMultiScale(smallImg, faces,
-        1.1, 2, 0
-        //|CASCADE_FIND_BIGGEST_OBJECT
-        //|CASCADE_DO_ROUGH_SEARCH
-        | CASCADE_SCALE_IMAGE,
-        Size(30, 30));
-    if (tryflip)
-    {
-        flip(smallImg, smallImg, 1);
-        cascade.detectMultiScale(smallImg, faces2,
-            1.1, 2, 0
-            //|CASCADE_FIND_BIGGEST_OBJECT
-            //|CASCADE_DO_ROUGH_SEARCH
-            | CASCADE_SCALE_IMAGE,
-            Size(30, 30));
-        for (vector<Rect>::const_iterator r = faces2.begin(); r != faces2.end(); ++r)
-        {
-            faces.push_back(Rect(smallImg.cols - r->x - r->width, r->y, r->width, r->height));
-        }
-    }
-    t = (double)getTickCount() - t;
-    printf("detection time = %g ms\n", t * 1000 / getTickFrequency());
-    for (size_t i = 0; i < faces.size(); i++)
-    {
-        Rect r = faces[i];
-        Mat smallImgROI;
-        vector<Rect> nestedObjects;
-        Point center;
-        Scalar color = colors[i % 8];
-        int radius;
-        double aspect_ratio = (double)r.width / r.height;
-        if (0.75 < aspect_ratio && aspect_ratio < 1.3)
-        {
-            center.x = cvRound((r.x + r.width * 0.5) * scale);
-            center.y = cvRound((r.y + r.height * 0.5) * scale);
-            radius = cvRound((r.width + r.height) * 0.25 * scale);
-            circle(img, center, radius, color, 3, 8, 0);
-        }
-        else
-            rectangle(img, Point(cvRound(r.x * scale), cvRound(r.y * scale)),
-                Point(cvRound((r.x + r.width - 1) * scale), cvRound((r.y + r.height - 1) * scale)),
-                color, 3, 8, 0);
-        if (nestedCascade.empty())
-            continue;
-        smallImgROI = smallImg(r);
-        nestedCascade.detectMultiScale(smallImgROI, nestedObjects,
-            1.1, 2, 0
-            //|CASCADE_FIND_BIGGEST_OBJECT
-            //|CASCADE_DO_ROUGH_SEARCH
-            //|CASCADE_DO_CANNY_PRUNING
-            | CASCADE_SCALE_IMAGE,
-            Size(30, 30));
-        for (size_t j = 0; j < nestedObjects.size(); j++)
-        {
-            Rect nr = nestedObjects[j];
-            center.x = cvRound((r.x + nr.x + nr.width * 0.5) * scale);
-            center.y = cvRound((r.y + nr.y + nr.height * 0.5) * scale);
-            radius = cvRound((nr.width + nr.height) * 0.25 * scale);
-            circle(img, center, radius, color, 3, 8, 0);
-        }
-    }
-    imshow("result", img);
 }
