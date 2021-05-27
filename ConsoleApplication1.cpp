@@ -1,298 +1,98 @@
-#include "opencv2/imgcodecs.hpp"
-#include "opencv2/highgui.hpp"
 #include "opencv2/imgproc.hpp"
-#include <iostream>
+#include "opencv2/videoio.hpp"
+#include "opencv2/highgui.hpp"
+#include "opencv2/video/background_segm.hpp"
+#include <stdio.h>
+#include <string>
 using namespace std;
 using namespace cv;
 static void help(char** argv)
 {
-    cout << "\nThis program demonstrates GrabCut segmentation -- select an object in a region\n"
-        "and then grabcut will attempt to segment it out.\n"
-        "Call:\n"
-        << argv[0] << " <image_name>\n"
-        "\nSelect a rectangular area around the object you want to segment\n" <<
-        "\nHot keys: \n"
-        "\tESC - quit the program\n"
-        "\tr - restore the original image\n"
-        "\tn - next iteration\n"
-        "\n"
-        "\tleft mouse button - set rectangle\n"
-        "\n"
-        "\tCTRL+left mouse button - set GC_BGD pixels\n"
-        "\tSHIFT+left mouse button - set GC_FGD pixels\n"
-        "\n"
-        "\tCTRL+right mouse button - set GC_PR_BGD pixels\n"
-        "\tSHIFT+right mouse button - set GC_PR_FGD pixels\n" << endl;
+    printf("\n"
+        "This program demonstrated a simple method of connected components clean up of background subtraction\n"
+        "When the program starts, it begins learning the background.\n"
+        "You can toggle background learning on and off by hitting the space bar.\n"
+        "Call\n"
+        "%s [video file, else it reads camera 0]\n\n", argv[0]);
 }
-const Scalar RED = Scalar(0, 0, 255);
-const Scalar PINK = Scalar(230, 130, 255);
-const Scalar BLUE = Scalar(255, 0, 0);
-const Scalar LIGHTBLUE = Scalar(255, 255, 160);
-const Scalar GREEN = Scalar(0, 255, 0);
-const int BGD_KEY = EVENT_FLAG_CTRLKEY;
-const int FGD_KEY = EVENT_FLAG_SHIFTKEY;
-static void getBinMask(const Mat& comMask, Mat& binMask)
+static void refineSegments(const Mat& img, Mat& mask, Mat& dst)
 {
-    if (comMask.empty() || comMask.type() != CV_8UC1)
-        CV_Error(Error::StsBadArg, "comMask is empty or has incorrect type (not CV_8UC1)");
-    if (binMask.empty() || binMask.rows != comMask.rows || binMask.cols != comMask.cols)
-        binMask.create(comMask.size(), CV_8UC1);
-    binMask = comMask & 1;
-}
-class GCApplication
-{
-public:
-    enum { NOT_SET = 0, IN_PROCESS = 1, SET = 2 };
-    static const int radius = 2;
-    static const int thickness = -1;
-    void reset();
-    void setImageAndWinName(const Mat& _image, const string& _winName);
-    void showImage() const;
-    void mouseClick(int event, int x, int y, int flags, void* param);
-    int nextIter();
-    int getIterCount() const { return iterCount; }
-private:
-    void setRectInMask();
-    void setLblsInMask(int flags, Point p, bool isPr);
-    const string* winName;
-    const Mat* image;
-    Mat mask;
-    Mat bgdModel, fgdModel;
-    uchar rectState, lblsState, prLblsState;
-    bool isInitialized;
-    Rect rect;
-    vector<Point> fgdPxls, bgdPxls, prFgdPxls, prBgdPxls;
-    int iterCount;
-};
-void GCApplication::reset()
-{
-    if (!mask.empty())
-        mask.setTo(Scalar::all(GC_BGD));
-    bgdPxls.clear(); fgdPxls.clear();
-    prBgdPxls.clear();  prFgdPxls.clear();
-    isInitialized = false;
-    rectState = NOT_SET;
-    lblsState = NOT_SET;
-    prLblsState = NOT_SET;
-    iterCount = 0;
-}
-void GCApplication::setImageAndWinName(const Mat& _image, const string& _winName)
-{
-    if (_image.empty() || _winName.empty())
+    int niters = 3;
+    vector<vector<Point> > contours;
+    vector<Vec4i> hierarchy;
+    Mat temp;
+    dilate(mask, temp, Mat(), Point(-1, -1), niters);
+    erode(temp, temp, Mat(), Point(-1, -1), niters * 2);
+    dilate(temp, temp, Mat(), Point(-1, -1), niters);
+    findContours(temp, contours, hierarchy, RETR_CCOMP, CHAIN_APPROX_SIMPLE);
+    dst = Mat::zeros(img.size(), CV_8UC3);
+    if (contours.size() == 0)
         return;
-    image = &_image;
-    winName = &_winName;
-    mask.create(image->size(), CV_8UC1);
-    reset();
-}
-void GCApplication::showImage() const
-{
-    if (image->empty() || winName->empty())
-        return;
-    Mat res;
-    Mat binMask;
-    if (!isInitialized)
-        image->copyTo(res);
-    else
+    // iterate through all the top-level contours,
+    // draw each connected component with its own random color
+    int idx = 0, largestComp = 0;
+    double maxArea = 0;
+    for (; idx >= 0; idx = hierarchy[idx][0])
     {
-        getBinMask(mask, binMask);
-        image->copyTo(res, binMask);
-    }
-    vector<Point>::const_iterator it;
-    for (it = bgdPxls.begin(); it != bgdPxls.end(); ++it)
-        circle(res, *it, radius, BLUE, thickness);
-    for (it = fgdPxls.begin(); it != fgdPxls.end(); ++it)
-        circle(res, *it, radius, RED, thickness);
-    for (it = prBgdPxls.begin(); it != prBgdPxls.end(); ++it)
-        circle(res, *it, radius, LIGHTBLUE, thickness);
-    for (it = prFgdPxls.begin(); it != prFgdPxls.end(); ++it)
-        circle(res, *it, radius, PINK, thickness);
-    if (rectState == IN_PROCESS || rectState == SET)
-        rectangle(res, Point(rect.x, rect.y), Point(rect.x + rect.width, rect.y + rect.height), GREEN, 2);
-    imshow(*winName, res);
-}
-void GCApplication::setRectInMask()
-{
-    CV_Assert(!mask.empty());
-    mask.setTo(GC_BGD);
-    rect.x = max(0, rect.x);
-    rect.y = max(0, rect.y);
-    rect.width = min(rect.width, image->cols - rect.x);
-    rect.height = min(rect.height, image->rows - rect.y);
-    (mask(rect)).setTo(Scalar(GC_PR_FGD));
-}
-void GCApplication::setLblsInMask(int flags, Point p, bool isPr)
-{
-    vector<Point>* bpxls, * fpxls;
-    uchar bvalue, fvalue;
-    if (!isPr)
-    {
-        bpxls = &bgdPxls;
-        fpxls = &fgdPxls;
-        bvalue = GC_BGD;
-        fvalue = GC_FGD;
-    }
-    else
-    {
-        bpxls = &prBgdPxls;
-        fpxls = &prFgdPxls;
-        bvalue = GC_PR_BGD;
-        fvalue = GC_PR_FGD;
-    }
-    if (flags & BGD_KEY)
-    {
-        bpxls->push_back(p);
-        circle(mask, p, radius, bvalue, thickness);
-    }
-    if (flags & FGD_KEY)
-    {
-        fpxls->push_back(p);
-        circle(mask, p, radius, fvalue, thickness);
-    }
-}
-void GCApplication::mouseClick(int event, int x, int y, int flags, void*)
-{
-    // TODO add bad args check
-    switch (event)
-    {
-    case EVENT_LBUTTONDOWN: // set rect or GC_BGD(GC_FGD) labels
-    {
-        bool isb = (flags & BGD_KEY) != 0,
-            isf = (flags & FGD_KEY) != 0;
-        if (rectState == NOT_SET && !isb && !isf)
+        const vector<Point>& c = contours[idx];
+        double area = fabs(contourArea(Mat(c)));
+        if (area > maxArea)
         {
-            rectState = IN_PROCESS;
-            rect = Rect(x, y, 1, 1);
+            maxArea = area;
+            largestComp = idx;
         }
-        if ((isb || isf) && rectState == SET)
-            lblsState = IN_PROCESS;
     }
-    break;
-    case EVENT_RBUTTONDOWN: // set GC_PR_BGD(GC_PR_FGD) labels
-    {
-        bool isb = (flags & BGD_KEY) != 0,
-            isf = (flags & FGD_KEY) != 0;
-        if ((isb || isf) && rectState == SET)
-            prLblsState = IN_PROCESS;
-    }
-    break;
-    case EVENT_LBUTTONUP:
-        if (rectState == IN_PROCESS)
-        {
-            rect = Rect(Point(rect.x, rect.y), Point(x, y));
-            rectState = SET;
-            setRectInMask();
-            CV_Assert(bgdPxls.empty() && fgdPxls.empty() && prBgdPxls.empty() && prFgdPxls.empty());
-            showImage();
-        }
-        if (lblsState == IN_PROCESS)
-        {
-            setLblsInMask(flags, Point(x, y), false);
-            lblsState = SET;
-            showImage();
-        }
-        break;
-    case EVENT_RBUTTONUP:
-        if (prLblsState == IN_PROCESS)
-        {
-            setLblsInMask(flags, Point(x, y), true);
-            prLblsState = SET;
-            showImage();
-        }
-        break;
-    case EVENT_MOUSEMOVE:
-        if (rectState == IN_PROCESS)
-        {
-            rect = Rect(Point(rect.x, rect.y), Point(x, y));
-            CV_Assert(bgdPxls.empty() && fgdPxls.empty() && prBgdPxls.empty() && prFgdPxls.empty());
-            showImage();
-        }
-        else if (lblsState == IN_PROCESS)
-        {
-            setLblsInMask(flags, Point(x, y), false);
-            showImage();
-        }
-        else if (prLblsState == IN_PROCESS)
-        {
-            setLblsInMask(flags, Point(x, y), true);
-            showImage();
-        }
-        break;
-    }
-}
-int GCApplication::nextIter()
-{
-    if (isInitialized)
-        grabCut(*image, mask, rect, bgdModel, fgdModel, 1);
-    else
-    {
-        if (rectState != SET)
-            return iterCount;
-        if (lblsState == SET || prLblsState == SET)
-            grabCut(*image, mask, rect, bgdModel, fgdModel, 1, GC_INIT_WITH_MASK);
-        else
-            grabCut(*image, mask, rect, bgdModel, fgdModel, 1, GC_INIT_WITH_RECT);
-        isInitialized = true;
-    }
-    iterCount++;
-    bgdPxls.clear(); fgdPxls.clear();
-    prBgdPxls.clear(); prFgdPxls.clear();
-    return iterCount;
-}
-GCApplication gcapp;
-static void on_mouse(int event, int x, int y, int flags, void* param)
-{
-    gcapp.mouseClick(event, x, y, flags, param);
+    Scalar color(0, 0, 255);
+    drawContours(dst, contours, largestComp, color, FILLED, LINE_8, hierarchy);
 }
 int main(int argc, char** argv)
 {
-    cv::CommandLineParser parser(argc, argv, "{@input| messi5.jpg |}");
-    help(argv);
-    string filename = parser.get<string>("@input");
-    if (filename.empty())
+    VideoCapture cap;
+    bool update_bg_model = true;
+    CommandLineParser parser(argc, argv, "{help h||}{@input||}");
+    if (parser.has("help"))
     {
-        cout << "\nDurn, empty filename" << endl;
-        return 1;
+        help(argv);
+        return 0;
     }
-    Mat image = imread(samples::findFile(filename), IMREAD_COLOR);
-    if (image.empty())
+    string input = parser.get<std::string>("@input");
+    if (input.empty())
+        cap.open(0);
+    else
+        cap.open(samples::findFileOrKeep(input));
+    if (!cap.isOpened())
     {
-        cout << "\n Durn, couldn't read image filename " << filename << endl;
-        return 1;
+        printf("\nCan not open camera or video file\n");
+        return -1;
     }
-    const string winName = "image";
-    namedWindow(winName, WINDOW_AUTOSIZE);
-    setMouseCallback(winName, on_mouse, 0);
-    gcapp.setImageAndWinName(image, winName);
-    gcapp.showImage();
+    Mat tmp_frame, bgmask, out_frame;
+    cap >> tmp_frame;
+    if (tmp_frame.empty())
+    {
+        printf("can not read data from the video source\n");
+        return -1;
+    }
+    namedWindow("video", 1);
+    namedWindow("segmented", 1);
+    Ptr<BackgroundSubtractorMOG2> bgsubtractor = createBackgroundSubtractorMOG2();
+    bgsubtractor->setVarThreshold(10);
     for (;;)
     {
-        char c = (char)waitKey(0);
-        switch (c)
+        cap >> tmp_frame;
+        if (tmp_frame.empty())
+            break;
+        bgsubtractor->apply(tmp_frame, bgmask, update_bg_model ? -1 : 0);
+        refineSegments(tmp_frame, bgmask, out_frame);
+        imshow("video", tmp_frame);
+        imshow("segmented", out_frame);
+        char keycode = (char)waitKey(30);
+        if (keycode == 27)
+            break;
+        if (keycode == ' ')
         {
-        case '\x1b':
-            cout << "Exiting ..." << endl;
-            goto exit_main;
-        case 'r':
-            cout << endl;
-            gcapp.reset();
-            gcapp.showImage();
-            break;
-        case 'n':
-            int iterCount = gcapp.getIterCount();
-            cout << "<" << iterCount << "... ";
-            int newIterCount = gcapp.nextIter();
-            if (newIterCount > iterCount)
-            {
-                gcapp.showImage();
-                cout << iterCount << ">" << endl;
-            }
-            else
-                cout << "rect must be determined>" << endl;
-            break;
+            update_bg_model = !update_bg_model;
+            printf("Learn background is in state = %d\n", update_bg_model);
         }
     }
-exit_main:
-    destroyWindow(winName);
     return 0;
 }
